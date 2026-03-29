@@ -1,0 +1,11 @@
+# Data Fetching
+yfinance==0.2.52
+
+# Vector Database & AI
+chromadb==0.5.0
+sentence-transformers==3.0.1
+
+# Utilities
+pandas==2.2.0
+numpy==1.26.4
+finnhub-python
