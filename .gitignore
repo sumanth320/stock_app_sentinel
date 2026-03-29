@@ -1,0 +1,5 @@
+chroma_data/
+.idea/
+.venv/
+__pycache__/
+*.pyc
