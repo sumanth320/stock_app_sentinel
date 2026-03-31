@@ -1,119 +1,95 @@
-import os
-import time
-import finnhub
-import chromadb
-from datetime import datetime, timedelta
+import os, finnhub, chromadb, logging, json, datetime
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
+from datetime import timedelta
 
-# --- 1. CONFIGURATION & SECURITY ---
-# Grab API Key from the Environment (Injected via --env-file .env)
+
+# --- STRUCTURED LOGGING ---
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        log_record = {
+            "timestamp": datetime.datetime.utcnow().isoformat(),
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "logger": record.name
+        }
+        if hasattr(record, "extra"):
+            log_record.update(record.extra)
+        return json.dumps(log_record)
+
+
+logger = logging.getLogger("Sentinel")
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+# --- CONFIG & CLIENTS ---
 FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY")
-
 if not FINNHUB_KEY:
-    print("❌ ERROR: FINNHUB_API_KEY not found! Check your .env file.")
+    logger.error("API Key Missing")
     exit(1)
 
-# Initialize Finnhub Client
 finnhub_client = finnhub.Client(api_key=FINNHUB_KEY)
-
-# Initialize ChromaDB with Telemetry Disabled (Fixes the capture() error)
-DB_PATH = "./chroma_data"
-client = chromadb.PersistentClient(
-    path=DB_PATH,
-    settings=Settings(anonymized_telemetry=False)
-)
-
-# Using Sentence Transformers for high-quality local embeddings
-embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="all-MiniLM-L6-v2"
-)
-
-collection = client.get_or_create_collection(
-    name="stock_sentinel_news",
-    embedding_function=embedding_func
-)
+client = chromadb.PersistentClient(path="./chroma_data", settings=Settings(anonymized_telemetry=False))
+embedding_func = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+collection = client.get_or_create_collection(name="stock_news", embedding_function=embedding_func)
 
 
-# --- 2. INGESTION ENGINE ---
-def ingest_stock_news(ticker_symbol):
-    print(f"\n--- 🛰️ Sentinel Ingest: {ticker_symbol} ---")
-
-    # 60-Day Lookback for better "War Phase" context
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
+def ingest_stock_news(ticker):
+    logger.info(f"Starting fetch", extra={"ticker": ticker, "action": "ingest_start"})
+    start_date = (datetime.datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
+    end_date = datetime.datetime.now().strftime('%Y-%m-%d')
 
     try:
-        # Fetching news (Up to 1 year back is allowed on free tier)
-        news_list = finnhub_client.company_news(ticker_symbol, _from=start_date, to=end_date)
-
-        if not news_list:
-            print(f"⚠️ No news found for {ticker_symbol} in the last 60 days.")
-            return
-
-        print(f"📥 Found {len(news_list)} articles. Storing top 15...")
-
-        for i, article in enumerate(news_list[:15]):
-            headline = article.get('headline', 'No Title')
-            summary = article.get('summary', '')
-            url = article.get('url', '')
-            timestamp = article.get('datetime', int(time.time()))
-
-            # Combine Headline + Summary for the RAG Context
-            full_text = f"{headline}. {summary}"
-
-            # Create a unique ID to prevent duplicates
-            doc_id = f"{ticker_symbol}_{timestamp}_{i}"
-
+        news = finnhub_client.company_news(ticker, _from=start_date, to=end_date)
+        count = len(news[:15])
+        for i, art in enumerate(news[:15]):
             collection.upsert(
-                documents=[full_text],
+                documents=[f"{art['headline']}. {art['summary']}"],
                 metadatas=[{
-                    "ticker": ticker_symbol,
-                    "url": url,
-                    "timestamp": timestamp,
-                    "date": datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
+                    "ticker": ticker,
+                    "timestamp": int(art['datetime'])  # Finnhub gives Unix timestamps
                 }],
-                ids=[doc_id]
+                ids=[f"{ticker}_{art['datetime']}"]
             )
+        logger.info("Ingest complete", extra={"ticker": ticker, "count": count, "status": "success"})
+    except Exception as e:
+        logger.error("Ingest failed", extra={"ticker": ticker, "error": str(e)})
 
-        print(f"✅ Successfully updated {ticker_symbol} database.")
+
+def query_sentinel(question):
+    logger.info("New query received", extra={"action": "query_start"})
+    try:
+        start_time = int((datetime.datetime.now() - datetime.timedelta(days=days)).timestamp())
+
+        results = collection.query(
+            query_texts=[question],
+            n_results=4,
+            # Metadata Filter: Only show news from the last X days
+            where={"timestamp": {"$gte": start_time}}
+        )
+
+        # Log the success so Grafana can see it
+        logger.info("Query successful", extra={
+            "action": "query_end",
+            "result_count": len(results['documents'][0])
+        })
+
+        print("\n--- SENTINEL FINDINGS ---")
+        for i in range(len(results['documents'][0])):
+            print(f"\nSource {i + 1}: {results['metadatas'][0][i]['url']}")
+            print(f"Content: {results['documents'][0][i][:200]}...")
+        print("\n-------------------------\n")
 
     except Exception as e:
-        print(f"❌ Finnhub API Error: {e}")
+        logger.error("Query failed", extra={"error": str(e)})
 
-
-# --- 3. RAG QUERY ENGINE ---
-def query_sentinel(user_query):
-    print(f"\n--- 🧠 Sentinel Analysis: '{user_query}' ---")
-
-    results = collection.query(
-        query_texts=[user_query],
-        n_results=3
-    )
-
-    if not results['documents'][0]:
-        print("🤷 No relevant news found in local database. Try 'fetch' first.")
-        return
-
-    for i, doc in enumerate(results['documents'][0]):
-        meta = results['metadatas'][0][i]
-        print(f"\n[{i + 1}] Source Date: {meta['date']}")
-        print(f"Insight: {doc}")
-        print(f"Read more: {meta['url']}")
-
-
-# --- 4. MAIN LOOP ---
 if __name__ == "__main__":
-    print("🚀 Stock App Sentinel Initialized (M4 Optimized)")
     while True:
-        mode = input("\n[fetch] get news | [ask] query AI | [exit]: ").lower()
-
-        if mode == 'fetch':
-            t = input("Enter Ticker: ").upper()
-            ingest_stock_news(t)
-        elif mode == 'ask':
-            q = input("What would you like to know?: ")
-            query_sentinel(q)
-        elif mode == 'exit':
-            print("Shutting down...")
-            break
+        cmd = input("[fetch/ask/exit]: ").lower()
+        if cmd == 'fetch':
+            ingest_stock_news(input("Ticker: ").upper())
+        elif cmd == 'ask':
+            query_sentinel(input("Your Question: "))
+        elif cmd == 'exit': break
