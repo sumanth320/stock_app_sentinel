@@ -77,16 +77,15 @@ def ingest_stock_news(ticker):
 
 
 def generate_answer(question, context_list):
-    """Phase 3 & 4: Augmentation & Generation (via Local Ollama)"""
+    """Phase 3 & 4: Augmentation & Generation (Docker-to-Docker)"""
     if not context_list:
         return "I couldn't find any relevant news in my database to answer that."
 
-    # Augment the prompt with retrieved context
     context_text = "\n---\n".join(context_list)
     prompt = f"""
     You are a professional financial analyst. 
-    Using the provided news snippets below, answer the user's question accurately.
-    If the answer is not contained within the context, state that you do not have enough information.
+    Use the following news snippets to answer the user's question.
+    If the answer isn't in the context, say you don't have enough data.
 
     CONTEXT:
     {context_text}
@@ -96,19 +95,33 @@ def generate_answer(question, context_list):
     ANALYST RESPONSE:"""
 
     try:
-        # Communicate with the Ollama container over the Docker network
+        # 180s timeout is necessary for CPU-based inference on 8B models
         response = requests.post(
-            "http://ollama:11434/api/generate",
+            "http://host.docker.internal:11434/api/generate",
             json={
                 "model": "llama3",
                 "prompt": prompt,
-                "stream": False
+                "stream": False  # Ensure streaming is off to avoid JSON errors
             },
-            timeout=180  # Give it 3 full minutes to "warm up"
+            timeout=180
         )
-        return response.json().get('response', 'Error: No response from LLM.')
+
+        # Check for HTTP errors (404, 500, etc)
+        response.raise_for_status()
+
+        # Handle potential "Extra data" by accessing the first JSON object
+        try:
+            return response.json().get('response', 'Error: No response field found.')
+        except ValueError:
+            # If Ollama sends multiple JSON objects, we split and take the first valid one
+            raw_text = response.text.strip().split('\n')[0]
+            import json
+            return json.loads(raw_text).get('response', 'Error: Failed to parse LLM JSON.')
+
+    except requests.exceptions.HTTPError as e:
+        return f"LLM Server Error: {response.status_code} - {response.text}"
     except Exception as e:
-        return f"Local LLM Error: {str(e)}. (Is Ollama running and Llama3 pulled?)"
+        return f"Local LLM Error: {str(e)}"
 
 
 def query_sentinel(question, ticker_filter=None, days_back=7):
