@@ -1,0 +1,19 @@
+replicaCount: 1
+
+image:
+  repository: sentinel-rag
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: ""
+
+env:
+  FINNHUB_API_KEY: "d74j0q9r01qg1eo5md9gd74j0q9r01qg1eo5mda0"
+  OLLAMA_URL: "http://host.docker.internal:11434/api/generate"

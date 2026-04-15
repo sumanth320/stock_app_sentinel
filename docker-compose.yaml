@@ -6,6 +6,7 @@ services:
     stdin_open: true
     tty: true
     volumes:
+      - .:/app
       - ./chroma_data:/app/chroma_data
     depends_on:
       - ollama

@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sentinel.fullname" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: sentinel
+  template:
+    metadata:
+      labels:
+        app: sentinel
+    spec:
+      containers:
+        - name: sentinel-app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: FINNHUB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sentinel.fullname" . }}-env
+                  key: FINNHUB_API_KEY
+            - name: OLLAMA_URL
+              value: {{ .Values.env.OLLAMA_URL | quote }}
+          volumeMounts:
+            - name: chroma-storage
+              mountPath: /app/chroma_data # This matches your Python code!
+      volumes:
+        - name: chroma-storage
+          persistentVolumeClaim:
+            claimName: {{ include "sentinel.fullname" . }}-chroma
